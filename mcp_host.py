@@ -1,49 +1,71 @@
 import asyncio
 import os
+import json
 from typing import List, Dict
 
 from mcp_client import MCPClient
 import google.generativeai as genai
 
 async def main():
-    # MCP 클라이언트 인스턴스 생성
     client = MCPClient()
     await client.connect(command="python", args=["mcp_server.py"])
     tools = await client.list_tools()
 
-    # Gemini 설정
     genai.configure(api_key=os.environ["GEMINI_API_KEY"])
     model = genai.GenerativeModel("gemini-2.0-flash")
-    #model = genai.GenerativeModel("gemini-2.5-pro")
 
-    # 사용자 입력 처리
-    while True:
-        user_input = input("\n질문을 입력하세요 (종료하려면 'exit'): ")
-        if user_input.lower() == "exit":
-            break
+    tool_names = [tool.name for tool in tools]
 
-        # Gemini에게 도구 목록과 함께 사용자 입력 전달
-        tool_descriptions = [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.inputSchema,
-            }
-            for tool in tools
-        ]
+    try:
+        while True:
+            user_input = input("\n질문을 입력하세요 (종료하려면 'exit'): ")
+            if user_input.lower() == "exit":
+                break
 
-        prompt = f"""
-사용자의 질문: "{user_input}"
+            tool_descriptions = [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.inputSchema,
+                }
+                for tool in tools
+            ]
+
+            prompt = f"""
+당신은 도구 실행이 가능한 AI 비서입니다.
 다음은 사용 가능한 도구 목록입니다:
-{tool_descriptions}
-사용자의 질문에 적합한 도구가 있다면 해당 도구를 호출하고, 없다면 직접 응답을 생성하세요.
+{json.dumps(tool_descriptions, ensure_ascii=False, indent=2)}
+
+사용자의 질문: "{user_input}"
+
+도구를 사용할 경우 다음 JSON 형식으로만 응답하십시오:
+{{"tool_call": "tool_name", "arguments": {{"arg1": "value1", ...}}}}
+
+도구 사용이 필요 없을 경우에는 평범한 문장으로 답변하십시오.
 """
 
-        response = model.generate_content(prompt)
-        print("응답:", response.text)
-        await asyncio.sleep(0.1)
-    await client.close()
+            response = model.generate_content(prompt)
+            content = response.text.strip()
+
+            # 도구 실행 응답인지 확인
+            if content.startswith("{") and '"tool_call"' in content:
+                try:
+                    tool_data = json.loads(content)
+                    tool_name = tool_data["tool_call"]
+                    arguments = tool_data.get("arguments", {})
+
+                    print(f"[도구 호출] {tool_name} with {arguments}")
+                    result = await client.call_tool(tool_name, arguments)
+                    print(f"[도구 응답] {result}")
+                except Exception as e:
+                    print(f"[도구 호출 실패] {e}")
+            else:
+                print("응답:", content)
+
+            await asyncio.sleep(0.1)
+
+    finally:
+        await client.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
-
